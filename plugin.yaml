@@ -1,5 +1,5 @@
 name: fortune-wheel-llm
 kind: exclusive
-version: '1.0.0'
-description: Fallback rotator pondéré (position+latence+quota) pour Hermes ha-only, RR pur optionnel, avec cooldown exponentiel type llm-keypool, sans fuite de données.
+version: '1.1.0'
+description: Weighted LLM fallback rotator (position+latency+quota) with llm-keypool-style cooldown and pure round-robin option. Works on any Hermes profile.
 on_enable: fortune_wheel_llm.register

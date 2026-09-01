@@ -1,18 +1,18 @@
 # mypy: ignore
 """
-fortune-wheel-llm — weighted LLM fallback rotator for Hermes.
+fortune-wheel-llm — fallback rotator pondéré pour Hermes (profil ha-only).
 
-Adapted from llm-keypool (header cooldown, fallback strategies, rpd quota,
-slot_count) + position+latency weighting. No secret leakage.
+Reprend les bonnes idées de llm-keypool (header cooldown, stratégies fallback,
+quota rpd, slot_count) + pondération position+latence. Aucune fuite de secrets.
 
-Security & robustness:
-- No network calls, no eval/exec/subprocess.
-- Local JSON state file only: provider/latency/cooldown/count — never api_key.
-- 0o600 permissions on state file.
-- Strict JSON validation, ignores corrupted entries.
-- No logging of prompts or user content.
-- GC scan limited (every 2s) + strict deque filter.
-- Gracefully handles missing or single fallback_providers.
+Sécurité & robustesse:
+- Aucun appel réseau, aucun eval/exec/subprocess.
+- State file JSON local uniquement: provider/latence/cooldown/count — jamais d'api_key.
+
+- Permissions 0o600 sur state file.
+- Validation stricte du JSON, ignore les entrées corrompues.
+- Pas de log de prompts ni de contenu utilisateur.
+- gc scan limité (toutes les 2s) + filtre strict deque.
 """
 import json
 import logging
@@ -25,44 +25,31 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger("fortune_wheel_llm")
 
-# --- safe parsers (defined first — used at module level) ---
-def _safe_float(v, default=0.0):
-    try:
-        return float(v)
-    except Exception:
-        return default
-
-def _safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        return default
-
-# --- env config (no sensitive data) ---
+# --- config env (aucune donnée sensible) ---
 _ENABLED = os.environ.get("HERMES_FALLBACK_ROTATE", "true").lower() not in ("0", "false", "no", "off", "")
 _WEIGHTED = os.environ.get("HERMES_FALLBACK_WEIGHTED", "true").lower() not in ("0", "false", "no", "off", "")
-_WEIGHT_POS = _safe_float(os.environ.get("HERMES_FALLBACK_WEIGHT_POS", "0.6"), 0.6)
-_WEIGHT_LAT = _safe_float(os.environ.get("HERMES_FALLBACK_WEIGHT_LAT", "1.0"), 1.0)
-_LAT_ALPHA = _safe_float(os.environ.get("HERMES_FALLBACK_LATENCY_ALPHA", "0.3"), 0.3)
-_LAT_DEFAULT_MS = _safe_float(os.environ.get("HERMES_FALLBACK_LATENCY_DEFAULT_MS", "800"), 800)
+_WEIGHT_POS = float(os.environ.get("HERMES_FALLBACK_WEIGHT_POS", "0.6"))
+_WEIGHT_LAT = float(os.environ.get("HERMES_FALLBACK_WEIGHT_LAT", "1.0"))
+_LAT_ALPHA = float(os.environ.get("HERMES_FALLBACK_LATENCY_ALPHA", "0.3"))
+_LAT_DEFAULT_MS = float(os.environ.get("HERMES_FALLBACK_LATENCY_DEFAULT_MS", "800"))
 _COOLDOWN_BASE_S = _safe_int(os.environ.get("HERMES_FALLBACK_COOLDOWN_BASE_S", "60"), 60)
 _COOLDOWN_MAX_S = _safe_int(os.environ.get("HERMES_FALLBACK_COOLDOWN_MAX_S", "14400"), 14400)
 _STATE = pathlib.Path(os.environ.get("HERMES_FALLBACK_ROTATE_STATE",
-    str(pathlib.Path.home() / ".hermes" / "fortune-wheel-state.json")))
+    str(pathlib.Path.home() / ".hermes" / "ha-fallback-rotate-state.json")))
 _LOCK = threading.Lock()
 
-# --- llm-keypool vendor (read-only) ---
+# --- llm-keypool vendor (lecture seule, pas d'écriture) ---
 try:
     from llm_keypool.providers.headers import extract_cooldown as _lk_extract
 except Exception:
     _lk_extract = None
 
 try:
-    _PROVIDER_CFG = json.load(open(os.path.expanduser("~/.config/llm-keypool/providers.json")))["providers"]
+    import json as _j
+    _PROVIDER_CFG = _j.load(open(os.path.expanduser("~/.config/llm-keypool/providers.json")))["providers"]
 except Exception:
     _PROVIDER_CFG = {}
 
-# --- fallback strategies ---
 def _next_utc_midnight():
     now = datetime.now(timezone.utc)
     return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -100,19 +87,9 @@ def _alias(p: str) -> str:
     p = (p or "").strip().lower()
     return "google" if p == "gemini" else p
 
-# --- state I/O (atomic) ---
+# --- state I/O atomique ---
 def _load() -> dict:
     if not _STATE.exists():
-        # backward compat: try old path
-        old = pathlib.Path.home() / ".hermes" / "ha-fallback-rotate-state.json"
-        if old.exists():
-            try:
-                data = json.loads(old.read_text())
-                if isinstance(data, dict):
-                    _save(data)
-                    return data
-            except Exception:
-                pass
         return {}
     try:
         data = json.loads(_STATE.read_text())
@@ -125,6 +102,7 @@ def _save(state: dict) -> None:
         _STATE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _STATE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+        # permissions 0o600 (pas de fuite multi-user)
         try:
             os.chmod(tmp, 0o600)
         except Exception:
@@ -142,6 +120,19 @@ def _key() -> str:
 
 def _now() -> float:
     return time.monotonic()
+
+
+def _safe_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+def _safe_int(v, default=0):
+    try:
+        return int(v)
+    except Exception:
+        return default
 
 # --- cooldown & stats ---
 def _cooldown_until(state: dict, provider: str):
@@ -177,7 +168,7 @@ def _record_latency(provider: str, latency_s: float) -> None:
         return
     try:
         ms = float(latency_s) * 1000.0
-        if not (0 < ms < 600000):
+        if not (0 < ms < 600000):  # garde-fou: ignore latences aberrantes (>10min impossible)
             return
     except Exception:
         return
@@ -201,6 +192,7 @@ def _record_latency(provider: str, latency_s: float) -> None:
 def _set_cooldown(state: dict, provider: str, until: float, headers=None) -> None:
     p = _alias(provider)
     iso = ""
+    # tentative header-aware (llm-keypool)
     if headers is not None and _lk_extract is not None:
         try:
             iso_try = _lk_extract(p, headers, was_429=True)
@@ -217,7 +209,7 @@ def _set_cooldown(state: dict, provider: str, until: float, headers=None) -> Non
             iso = iso_try
             dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
             delta = (dt - datetime.now(dt.tzinfo)).total_seconds()
-            if delta > 120:
+            if delta > 120:  # daily/monthly -> respecte la date
                 until = _now() + delta
         except Exception:
             pass
@@ -235,13 +227,11 @@ def _score(provider: str, idx: int, state: dict) -> float:
     pos = idx * _WEIGHT_POS
     req = _safe_int(state.get("stats", {}).get(p, {}).get("requests_today", 0))
     quota = _quota_score(p, req)
-    quota_contrib = -quota * 0.0005
+    quota_contrib = -quota * 0.0005  # léger: 1500 rpd ≈ -0.75, comparable à pos/lat
     lat = (_get_avg(state, p) / 1000.0) * _WEIGHT_LAT
     return pos + quota_contrib + lat
 
 def _select_weighted(chain: list, state: dict) -> list:
-    if len(chain) <= 1:
-        return list(chain)
     cands = []
     cooled = []
     for idx, entry in enumerate(chain):
@@ -256,8 +246,8 @@ def _select_weighted(chain: list, state: dict) -> list:
 
 def _effective_index(state: dict, chain: list, start: int) -> int:
     n = len(chain)
-    if n <= 1:
-        return 0
+    if n == 0:
+        return start
     i = start % n
     for _ in range(n):
         prov = (chain[i].get("provider") or "").strip().lower()
@@ -267,7 +257,7 @@ def _effective_index(state: dict, chain: list, start: int) -> int:
         i = (i + 1) % n
     return start
 
-# --- latency polling (lightweight, 2s) ---
+# --- latence polling (léger, 2s) ---
 def _find_agents():
     import gc
     for obj in gc.get_objects():
@@ -316,7 +306,7 @@ def register():
 
     def get_fallback_chain(config=None):
         chain = orig_chain(config)
-        if not chain or len(chain) <= 1:
+        if not chain:
             return chain
         chain = list(chain)
         k = _key()
@@ -327,7 +317,8 @@ def register():
                 _clear_expired(st, (e.get("provider") or ""))
             if _WEIGHTED:
                 return _select_weighted(chain, st)
-            idx = _safe_int(st.get(k, 0)) % len(chain)
+            # RR pur: rotation persistée + skip cooldown
+            idx = _safe_int(st.get(k, 0)) % len(chain) if chain else 0
             if idx:
                 chain = chain[idx:] + chain[:idx]
             eff = _effective_index(st, chain, 0)
@@ -347,8 +338,6 @@ def register():
     def _patched(agent, reason=None):
         try:
             chain = getattr(agent, "_fallback_chain", None) or []
-            if len(chain) <= 1:
-                return _orig(agent, reason)
             cur = _safe_int(getattr(agent, "_fallback_index", 0) or 0)
             if chain:
                 with _LOCK:
@@ -366,7 +355,7 @@ def register():
                                     break
                     elif not _WEIGHTED:
                         k = _key()
-                        sess = _safe_int(st.get(k, 0)) % len(chain)
+                        sess = _safe_int(st.get(k, 0)) % len(chain) if chain else 0
                         eff = _effective_index(st, chain, sess)
                         if eff != sess:
                             agent._fallback_index = eff
@@ -378,7 +367,7 @@ def register():
         try:
             chain = getattr(agent, "_fallback_chain", None) or []
             cur = _safe_int(getattr(agent, "_fallback_index", 0) or 0)
-            if chain and len(chain) > 1 and cur > 0 and not _WEIGHTED:
+            if chain and cur > 0 and not _WEIGHTED:
                 with _LOCK:
                     st = _load()
                     st[_key()] = cur % len(chain)
@@ -400,10 +389,11 @@ def register():
                 except Exception:
                     pass
             elif activated:
+                # succès après fallback: reset consecutive
                 try:
                     with _LOCK:
                         st = _load()
-                        if chain and len(chain) > 1 and 0 <= cur - 1 < len(chain):
+                        if chain and 0 <= cur - 1 < len(chain):
                             p2 = _alias((chain[cur - 1].get("provider") or "").strip().lower())
                             if p2 in st.get("stats", {}):
                                 st["stats"][p2]["consecutive_429"] = 0
@@ -417,6 +407,7 @@ def register():
     import agent.chat_completion_helpers as ch
     ch.try_activate_fallback = _patched
 
+    # polling léger
     def _poll():
         import time as _t
         while True:
@@ -427,7 +418,7 @@ def register():
             _t.sleep(2)
 
     threading.Thread(target=_poll, daemon=True, name="fortune-wheel-poll").start()
-    mode = "weighted pos+lat+quota" if _WEIGHTED else "pure round-robin"
+    mode = "pondéré pos+lat+quota" if _WEIGHTED else "RR pur"
     logger.info("fortune-wheel-llm: enabled — mode %s (Wpos=%.1f Wlat=%.1f) + cooldown exp", mode, _WEIGHT_POS, _WEIGHT_LAT)
 
 register()
