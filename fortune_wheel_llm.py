@@ -383,7 +383,9 @@ def register():
                     st = _load()
                     st[_key()] = cur % len(chain)
                     _save(st)
-            if reason in {FailoverReason.rate_limit, FailoverReason.upstream_rate_limit, FailoverReason.billing}:
+            _HARD_ERRORS = {FailoverReason.billing, FailoverReason.model_not_found}
+            _SOFT_ERRORS = {FailoverReason.rate_limit, FailoverReason.upstream_rate_limit}
+            if reason in _HARD_ERRORS | _SOFT_ERRORS:
                 try:
                     used = (cur - 1) % len(chain) if cur > 0 else 0
                     entry = chain[used] if chain else {}
@@ -396,7 +398,10 @@ def register():
                             backoff = min(_COOLDOWN_BASE_S * (2 ** consec), _COOLDOWN_MAX_S)
                             until = _now() + backoff
                             _set_cooldown(st, prov, until)
-                            logger.info("fortune-wheel cooldown %s %ds (429 #%d)", prov, backoff, consec + 1)
+                            if reason in _HARD_ERRORS:
+                                logger.warning("fortune-wheel HARD ERROR %s %s cooldown %ds (#%d)", prov, reason.value if reason else '?', backoff, consec + 1)
+                            else:
+                                logger.info("fortune-wheel cooldown %s %ds (429 #%d)", prov, backoff, consec + 1)
                 except Exception:
                     pass
             elif activated:
