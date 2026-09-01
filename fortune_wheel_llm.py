@@ -143,6 +143,18 @@ def _key() -> str:
 def _now() -> float:
     return time.monotonic()
 
+def _daily_reset(st: dict) -> dict:
+    """Reset requests_today + consecutive_429 at UTC midnight."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if st.get("_reset_date") == today:
+        return st
+    st["_reset_date"] = today
+    for prov, s in st.get("stats", {}).items():
+        s["requests_today"] = 0
+        s["consecutive_429"] = 0
+    return st
+
 # --- cooldown & stats ---
 def _cooldown_until(state: dict, provider: str):
     p = _alias(provider)
@@ -322,6 +334,7 @@ def register():
         k = _key()
         with _LOCK:
             st = _load()
+            _daily_reset(st)
             _maybe_update_latencies()
             for e in chain:
                 _clear_expired(st, (e.get("provider") or ""))
