@@ -1,30 +1,30 @@
 # fortune-wheel-llm
 
-Plugin Hermes — rotation intelligente des fallback LLM pour le profil `ha-only`.
+Hermes plugin — intelligent LLM fallback rotation for the `ha-only` profile.
 
-## Principe
+## How it works
 
-Le plugin pivote l'ordre de la chaîne `fallback_providers` (config.yaml) de deux manières contrôlées par une seule variable.
+The plugin reorders the `fallback_providers` chain (config.yaml) using two modes controlled by a single variable.
 
-- Par défaut, **mode pondéré** : `score = position*Wpos + quota*0.0005 + latency_seconds*Wlat`. Un provider lent ou proche de son quota RPD recule ; un provider rapide et frais monte.
-- Si `HERMES_FALLBACK_WEIGHTED=false`, **mode round-robin pur** : rotation persistée entre les runs, avec saut des providers en cooldown.
+- **Weighted mode** (default): `score = position*Wpos + quota*0.0005 + latency_seconds*Wlat`. A slow or quota-depleted provider drops; a fast, fresh provider rises.
+- **Pure round-robin** (`HERMES_FALLBACK_WEIGHTED=false`): persistent rotation between runs, skipping providers in cooldown.
 
-Dans les deux modes, un provider en 429 déclenche un cooldown exponentiel `60s * 2^n` (cap 4h), inspiré de `llm-keypool/rotator`. Le cooldown peut aussi être ponctué par les headers du provider quand `llm-keypool` est installé.
+In both modes, a 429 triggers an exponential cooldown `60s * 2^n` (capped at 4h), inspired by `llm-keypool/rotator`. Cooldown can also be driven by provider headers when `llm-keypool` is installed.
 
-La latence est estimée par EWMA (alpha=0.3) sur `_api_latency_history`, pollué toutes les 2 secondes. L'alias `gemini→google` est assuré automatiquement.
+Latency is estimated via EWMA (alpha=0.3) on `_api_latency_history`, polled every 2 seconds. The `gemini→google` alias is handled automatically.
 
 ## Install
 
-### 1. Dépôt
+### 1. Repository
 
 ```bash
 cd ~/.hermes/plugins
-git clone https://github.com/jimmysapède/fortune-wheel-llm.git
+git clone https://github.com/jsapede/fortune-wheel-llm.git
 ```
 
-### 2. Activer dans le profil `ha-only`
+### 2. Enable in the `ha-only` profile
 
-Édite `~/.hermes/profiles/ha-only/config.yaml` :
+Edit `~/.hermes/profiles/ha-only/config.yaml`:
 
 ```yaml
 plugins:
@@ -32,30 +32,75 @@ plugins:
     - fortune-wheel-llm
 ```
 
-Puis redémarre le profil `ha-only`.
+Then restart the `ha-only` profile.
 
-### 3. Prérequis optionnels (pour cooldown header-aware)
+### 3. Optional prerequisites (header-aware cooldown)
 
-La détection de cooldown via les headers du provider utilise `llm_keypool.providers.headers.extract_cooldown`. Si `llm-keypool` est présent dans l'environnement, le plugin l'utilise automatiquement ; sinon il se rabat sur les stratégies de fallback statiques (rolling / daily / monthly).
+Cooldown detection from provider headers uses `llm_keypool.providers.headers.extract_cooldown`. If `llm-keypool` is present, the plugin uses it automatically; otherwise it falls back to static strategies (rolling / daily / monthly).
 
-## Variables d'environnement
+## Example config
 
-| Variable | DÉFAUT | Description |
+### `fallback_providers` block (in `~/.hermes/profiles/ha-only/config.yaml`)
+
+```yaml
+plugins:
+  enabled:
+    - fortune-wheel-llm
+
+fallback_providers:
+  - provider: google
+    model: gemini-3.1-flash-lite
+  - provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b:free
+  - provider: openrouter
+    model: nvidia/nemotron-3-super-120b-a12b:free
+  - provider: cerebras
+    model: gemma-4-31b
+  - provider: mistral
+    model: mistral-small-latest
+  - provider: cohere
+    model: command-a-plus-05-2026
+  - provider: huggingface
+    model: meta-llama/Llama-3.3-70b-Instruct
+  - provider: ollama-cloud
+    model: gemma4:cloud
+```
+
+Order = preferred base order for scoring.
+
+### `.env` (optional, for header-aware cooldown via llm-keypool)
+
+```bash
+HERMES_FALLBACK_ROTATE=true
+HERMES_FALLBACK_WEIGHTED=true
+HERMES_FALLBACK_WEIGHT_POS=0.6
+HERMES_FALLBACK_WEIGHT_LAT=1.0
+HERMES_FALLBACK_LATENCY_ALPHA=0.3
+HERMES_FALLBACK_LATENCY_DEFAULT_MS=800
+HERMES_FALLBACK_COOLDOWN_BASE_S=60
+HERMES_FALLBACK_COOLDOWN_MAX_S=14400
+HERMES_FALLBACK_ROTATE_STATE=$HOME/.hermes/ha-fallback-rotate-state.json
+HERMES_PROFILE=ha-only
+```
+
+## Environment variables
+
+| Variable | DEFAULT | Description |
 | --- | --- | --- |
-| `HERMES_FALLBACK_ROTATE` | `true` | Active/désactive le plugin. |
-| `HERMES_FALLBACK_WEIGHTED` | `true` | `true` = pondération position+latency+quota ; `false` = round-robin pur. |
-| `HERMES_FALLBACK_WEIGHT_POS` | `0.6` | Poids de la position dans la chaîne (ordre préférentiel). |
-| `HERMES_FALLBACK_WEIGHT_LAT` | `1.0` | Poids de la latence EWMA dans le score. |
-| `HERMES_FALLBACK_LATENCY_ALPHA` | `0.3` | Alpha EWMA de la latence. |
-| `HERMES_FALLBACK_LATENCY_DEFAULT_MS` | `800` | Latence par défaut quand aucune mesure n'est disponible. |
-| `HERMES_FALLBACK_COOLDOWN_BASE_S` | `60` | Cooldown de base (429). |
-| `HERMES_FALLBACK_COOLDOWN_MAX_S` | `14400` | Cap du backoff exponentiel (4h). |
-| `HERMES_FALLBACK_ROTATE_STATE` | `~/.hermes/ha-fallback-rotate-state.json` | Fichier d'état local (JSON, 0600). |
-| `HERMES_PROFILE` | `default` | Profil courant ; injecté dans la clé d'état. |
+| `HERMES_FALLBACK_ROTATE` | `true` | Enable/disable the plugin. |
+| `HERMES_FALLBACK_WEIGHTED` | `true` | `true` = position+latency+quota weighting; `false` = pure round-robin. |
+| `HERMES_FALLBACK_WEIGHT_POS` | `0.6` | Position weight in the scoring chain. |
+| `HERMES_FALLBACK_WEIGHT_LAT` | `1.0` | EWMA latency weight in the score. |
+| `HERMES_FALLBACK_LATENCY_ALPHA` | `0.3` | EWMA alpha for latency. |
+| `HERMES_FALLBACK_LATENCY_DEFAULT_MS` | `800` | Default latency when no measurement is available. |
+| `HERMES_FALLBACK_COOLDOWN_BASE_S` | `60` | Base cooldown on 429. |
+| `HERMES_FALLBACK_COOLDOWN_MAX_S` | `14400` | Exponential backoff cap (4h). |
+| `HERMES_FALLBACK_ROTATE_STATE` | `~/.hermes/ha-fallback-rotate-state.json` | Local state file (JSON, 0600). |
+| `HERMES_PROFILE` | `default` | Current profile; injected into the state key. |
 
-## Fichier d'état
+## State file
 
-`~/.hermes/ha-fallback-rotate-state.json` est écrit avec permissions `0o600` par le plugin. Il contient uniquement :
+`~/.hermes/ha-fallback-rotate-state.json` is written with `0o600` permissions by the plugin. It contains only:
 
 - `stats.<provider>.avg_ms`
 - `stats.<provider>.count`
@@ -65,49 +110,48 @@ La détection de cooldown via les headers du provider utilise `llm_keypool.provi
 - `stats.<provider>.cooldown_until`
 - `cooldown.<provider>`
 
-**Aucune clé API, aucun token, aucun prompt n'est stocké.**
+**No API keys, tokens, or prompts are stored.**
 
-Le fichier peut être réinitialisé manuellement :
+To reset manually:
 
 ```bash
 truncate -s 0 ~/.hermes/ha-fallback-rotate-state.json
 ```
 
-## Test
+## Testing
 
-### Mode pondéré
+### Weighted mode
 
 ```bash
-ha-only chat -q "test" --oneshot -v | grep -E "fortunewheel-llm|Fallback chain|fortunewheel cooldown"
+ha-only chat -q "test" --oneshot -v | grep -E "fortune-wheel|Fallback chain|fortune-wheel cooldown"
 cat ~/.hermes/ha-fallback-rotate-state.json
 ```
 
-On vérifie que :
+Verify that:
+- the displayed chain matches the active mode,
+- a 429 leaves a cooldown for the affected provider,
+- the JSON state contains no API keys.
 
-- la chaîne affichée correspond au mode actif,
-- un 429 laisse un cooldown pour le provider concerné,
-- l'état JSON ne contient aucune clé API.
-
-### Mode round-robin pur
+### Pure round-robin mode
 
 ```bash
-HERMES_FALLBACK_WEIGHTED=false ha-only chat -q "test" --oneshot -v | grep -E "Fallback chain|fortunewheel cooldown"
+HERMES_FALLBACK_WEIGHTED=false ha-only chat -q "test" --oneshot -v | grep -E "Fallback chain|fortune-wheel cooldown"
 ```
 
-La chaîne doit revenir à un ordre déterministe par rotation persistée, en sautant les providers en cooldown.
+The chain should return to a deterministic order via persistent rotation, skipping providers in cooldown.
 
-## Sécurité
+## Security
 
-- Le plugin n'effectue **aucun appel réseau**.
-- Il ne contient **pas** de `eval`, `exec`, `subprocess`, ni de chargement dynamique.
-- Les seuls fichiers lus sont :
-  - `~/.config/llm-keypool/providers.json`, en lecture seule,
-  - `~/.hermes/ha-fallback-rotate-state.json`, en lecture/écriture locale.
-- Les seuls fichiers écrits sont le state file (JSON, 0o600) et son temporaire de remplacement.
-- Aucune donnée utilisateur, prompt, résultat, clé API n'est journalisée.
-- Les threads usés sont daemon ; le polling s'arrête à l'extinction du processus.
+- The plugin makes **no network calls**.
+- It contains **no** `eval`, `exec`, `subprocess`, or dynamic loading.
+- The only files read are:
+  - `~/.config/llm-keypool/providers.json` (read-only),
+  - `~/.hermes/ha-fallback-rotate-state.json` (local read/write).
+- The only files written are the state file (JSON, 0o600) and its temporary replacement.
+- No user data, prompts, results, or API keys are logged.
+- Threads are daemon; polling stops when the process exits.
 
-## Fichiers livrés
+## Delivered files
 
 - `fortune_wheel_llm.py`
 - `plugin.yaml`
